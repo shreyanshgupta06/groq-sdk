@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shreyansh Cloud</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/atom-one-dark.min.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-container">
+    <div class="chat-header">
+      <div class="chat-title">Shreyansh Cloud</div>
+      <div class="header-actions">
+        <button id="regenerate-response" title="Regenerate response">
+          <i class="fas fa-sync"></i>
+        </button>
+        <button id="stop-response" title="Stop generating" style="display: none">
+          <i class="fas fa-stop"></i>
+        </button>
+        <button id="toggle-theme" title="Toggle theme">
+          <i class="fas fa-moon"></i>
+        </button>
+      </div>
+    </div>
+    <div class="messages" id="messages">
+      <div class="intro-message">
+        <h1>Welcome to Shreyansh Cloud</h1>
+        <p>Ask me anything. I'm powered by Groq.</p>
+        <div class="suggestion-chips">
+          <button class="suggestion-chip">Tell me a story</button>
+          <button class="suggestion-chip">Explain quantum computing</button>
+          <button class="suggestion-chip">Write a poem</button>
+          <button class="suggestion-chip">Help me learn JavaScript</button>
+        </div>
+      </div>
+    </div>
+    <div class="input-area">
+      <div class="input-container">
+        <button id="file-upload-button" title="Upload File">
+          <i class="fas fa-paperclip"></i>
+        </button>
+        <input type="file" id="file-upload" style="display: none" />
+        <textarea id="user-input" placeholder="Type your message here..." rows="1"></textarea>
+        <button id="send-button" title="Send message">
+          <i class="fas fa-paper-plane"></i>
+        </button>
+      </div>
+      <div id="pending-file-preview"></div>
+      <div class="disclaimer">
+        Shreyansh Cloud may produce inaccurate information.
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.2.12/marked.min.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      // Configuration for Vercel
+      const MODEL = "llama3-70b-8192";
+      const API_ENDPOINT = "/api/chat"; // Vercel serverless function
+
+      // DOM Elements
+      const messagesContainer = document.getElementById("messages");
+      const userInput = document.getElementById("user-input");
+      const sendButton = document.getElementById("send-button");
+      const toggleThemeButton = document.getElementById("toggle-theme");
+      const regenerateResponseButton = document.getElementById("regenerate-response");
+      const stopResponseButton = document.getElementById("stop-response");
+      const suggestionChips = document.querySelectorAll(".suggestion-chip");
+      const fileUploadButton = document.getElementById("file-upload-button");
+      const fileUploadInput = document.getElementById("file-upload");
+
+      // State variables
+      let messages = [];
+      let isTyping = false;
+      let currentTheme = localStorage.getItem("theme") || "light";
+      let typingSpeed = 2;
+      let letterTimeout = null;
+      let pendingFile = null;
+      let stopGeneration = false;
+
+      // Initialize application
+      init();
+
+      function init() {
+        if (currentTheme === "dark") {
+          document.body.classList.add("dark-mode");
+          toggleThemeButton.innerHTML = '<i class="fas fa-sun"></i>';
+        }
+
+        // Event listeners
+        userInput.addEventListener("input", autoResizeTextarea);
+        sendButton.addEventListener("click", handleSendMessage);
+        userInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSendMessage();
+          }
+        });
+
+        toggleThemeButton.addEventListener("click", toggleTheme);
+        regenerateResponseButton.addEventListener("click", regenerateLastResponse);
+        stopResponseButton.addEventListener("click", stopGenerationHandler);
+
+        fileUploadButton.addEventListener("click", () => fileUploadInput.click());
+        fileUploadInput.addEventListener("change", handleFileUpload);
+
+        suggestionChips.forEach((chip) => {
+          chip.addEventListener("click", () => {
+            userInput.value = chip.textContent;
+            handleSendMessage();
+          });
+        });
+      }
+
+      async function handleSendMessage() {
+        if (isTyping) {
+          alert("Please wait until the current response is completed.");
+          return;
+        }
+        
+        const message = userInput.value.trim();
+        if (!message && !pendingFile) return;
+
+        userInput.value = "";
+        userInput.style.height = "auto";
+
+        if (message) {
+          addMessageToUI("user", message);
+          messages.push({ role: "user", content: message });
+        }
+
+        if (pendingFile) {
+          await processPendingFile();
+        }
+
+        try {
+          showTypingIndicator();
+          const response = await getAIResponse();
+          messages.push({ role: "assistant", content: response });
+        } catch (error) {
+          removeTypingIndicator();
+          addMessageToUI("ai", `Sorry, I encountered an error: ${error.message}`);
+        }
+      }
+
+      async function getAIResponse() {
+        isTyping = true;
+        stopGeneration = false;
+        toggleResponseButtons(true);
+
+        try {
+          const response = await fetch(API_ENDPOINT, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: MODEL,
+              messages: messages,
+              stream: true
+            })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error?.message || "Failed to get response");
+          }
+
+          // Create message container
+          const messageDiv = document.createElement("div");
+          messageDiv.className = "message ai";
+          const messageContent = document.createElement("div");
+          messageContent.className = "message-content";
+          messageDiv.appendChild(messageContent);
+          messagesContainer.appendChild(messageDiv);
+
+          // Stream handling
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let accumulatedText = "";
+
+          while (true) {
+            if (stopGeneration) break;
+            
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              
+              const jsonStr = line.slice("data: ".length).trim();
+              if (jsonStr === "[DONE]") break;
+
+              try {
+                const data = JSON.parse(jsonStr);
+                const text = data.choices?.[0]?.delta?.content || "";
+                if (text) {
+                  accumulatedText += text;
+                  messageContent.innerHTML = marked.parse(accumulatedText);
+                  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                }
+              } catch (e) {
+                console.error("Error parsing stream data:", e);
+              }
+            }
+          }
+
+          // Finalize message
+          messageDiv.remove();
+          addFormattedMessageToUI("ai", accumulatedText);
+          return accumulatedText;
+        } finally {
+          isTyping = false;
+          removeTypingIndicator();
+          toggleResponseButtons(false);
+        }
+      }
+
+      // Helper functions
+      function toggleResponseButtons(isGenerating) {
+        regenerateResponseButton.style.display = isGenerating ? "none" : "inline-block";
+        stopResponseButton.style.display = isGenerating ? "inline-block" : "none";
+      }
+
+      function stopGenerationHandler() {
+        stopGeneration = true;
+        clearTimeout(letterTimeout);
+        toggleResponseButtons(false);
+      }
+
+      function addMessageToUI(sender, content) {
+        const messageDiv = document.createElement("div");
+        messageDiv.className = `message ${sender}`;
+        const messageContent = document.createElement("div");
+        messageContent.className = "message-content";
+        messageContent.textContent = content;
+        messageDiv.appendChild(messageContent);
+        messagesContainer.appendChild(messageDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      }
+
+      function addFormattedMessageToUI(sender, content) {
+        const messageDiv = document.createElement("div");
+        messageDiv.className = `message ${sender}`;
+        const messageContent = document.createElement("div");
+        messageContent.className = "message-content";
+        messageContent.innerHTML = marked.parse(content);
+        messageDiv.appendChild(messageContent);
+        messagesContainer.appendChild(messageDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        
+        // Apply syntax highlighting
+        document.querySelectorAll('pre code').forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      }
+
+      function showTypingIndicator() {
+        const typingDiv = document.createElement("div");
+        typingDiv.className = "typing-indicator";
+        typingDiv.id = "typing-indicator";
+        for (let i = 0; i < 3; i++) {
+          const dot = document.createElement("div");
+          dot.className = "typing-dot";
+          typingDiv.appendChild(dot);
+        }
+        messagesContainer.appendChild(typingDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      }
+
+      function removeTypingIndicator() {
+        const typingIndicator = document.getElementById("typing-indicator");
+        if (typingIndicator) typingIndicator.remove();
+      }
+
+      function toggleTheme() {
+        document.body.classList.toggle("dark-mode");
+        currentTheme = currentTheme === "light" ? "dark" : "light";
+        toggleThemeButton.innerHTML = currentTheme === "light" 
+          ? '<i class="fas fa-moon"></i>' 
+          : '<i class="fas fa-sun"></i>';
+        localStorage.setItem("theme", currentTheme);
+      }
+
+      function autoResizeTextarea() {
+        userInput.style.height = "auto";
+        userInput.style.height = userInput.scrollHeight + "px";
+      }
+
+      function handleFileUpload(event) {
+        const file = event.target.files[0];
+        if (file) {
+          pendingFile = file;
+          displayPendingFilePreview(file);
+        }
+      }
+
+      function displayPendingFilePreview(file) {
+        const previewContainer = document.getElementById("pending-file-preview");
+        const reader = new FileReader();
+        
+        reader.onload = function(e) {
+          let previewHTML = "";
+          if (file.type.startsWith("image/")) {
+            previewHTML = `<img src="${e.target.result}" alt="${file.name}" style="max-width:100px; max-height:100px;"/>`;
+          } else if (file.type.startsWith("text/") || file.type === "application/json") {
+            let content = e.target.result;
+            if (content.length > 200) content = content.substring(0, 200) + "...";
+            previewHTML = `<pre style="white-space:pre-wrap;font-size:12px;">${escapeHtml(content)}</pre>`;
+          } else {
+            previewHTML = `<div style="font-size:12px;">${file.name}</div>`;
+          }
+          previewContainer.innerHTML = previewHTML;
+          previewContainer.style.display = "block";
+        };
+
+        if (file.type.startsWith("image/")) {
+          reader.readAsDataURL(file);
+        } else {
+          reader.readAsText(file);
+        }
+      }
+
+      async function processPendingFile() {
+        const file = pendingFile;
+        if (!file) return;
+
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            let previewHTML = "";
+            if (file.type.startsWith("image/")) {
+              previewHTML = `<img src="${e.target.result}" alt="${file.name}" style="max-width:100%;"/>`;
+            } else {
+              previewHTML = `<pre style="white-space:pre-wrap;">${escapeHtml(e.target.result)}</pre>`;
+            }
+            
+            addMessageToUI("user", `File: ${file.name}`);
+            messages.push({
+              role: "user",
+              content: `File: ${file.name}\n${previewHTML}`,
+              file: {
+                name: file.name,
+                type: file.type,
+                content: e.target.result
+              }
+            });
+            
+            document.getElementById("pending-file-preview").style.display = "none";
+            document.getElementById("pending-file-preview").innerHTML = "";
+            pendingFile = null;
+            resolve();
+          };
+
+          if (file.type.startsWith("image/")) {
+            reader.readAsDataURL(file);
+          } else {
+            reader.readAsText(file);
+          }
+        });
+      }
+
+      function escapeHtml(text) {
+        const map = {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#039;"
+        };
+        return text.replace(/[&<>"']/g, (m) => map[m]);
+      }
+
+      function regenerateLastResponse() {
+        if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+          messages.pop();
+          const aiMessages = document.querySelectorAll(".message.ai");
+          if (aiMessages.length > 0) {
+            aiMessages[aiMessages.length - 1].remove();
+          }
+          showTypingIndicator();
+          getAIResponse()
+            .then((response) => messages.push({ role: "assistant", content: response }))
+            .catch((error) => {
+              removeTypingIndicator();
+              addMessageToUI("ai", `Error: ${error.message}`);
+            });
+        }
+      }
+    });
+  </script>
+</body>
+</html>

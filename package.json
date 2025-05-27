@@ -1,0 +1,12 @@
+{
+  "name": "groq-chat",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node api/chat.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5"
+  }
+}
