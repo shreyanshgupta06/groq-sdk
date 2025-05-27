@@ -5,6 +5,6 @@
     { "source": "/api/(.*)", "destination": "/api/$1" }
   ],
   "env": {
-    "GROQ_API_KEY": "@groq-api-key"
+    "GROQ_API_KEY": "GROQ_API_KEY"
   }
 }
